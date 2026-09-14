@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Macland – Tilkynningar (app)
  * Description: Macland iPhone-appið: push-tilkynningar og Live Activity (pöntunarstaða) beint í gegnum Apple (APNs), auk gagna fyrir appið sem eru lesin af vefnum sjálfum.
- * Version: 1.5.1
+ * Version: 1.5.2
  * Author: Macland
  * License: GPL-2.0-or-later
  */
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
 
 final class Macland_Push
 {
-    const VERSION = '1.5.1';
+    const VERSION = '1.5.2';
     const OPTION = 'macland_push_settings';
     const LOG_OPTION = 'macland_push_log';
     const TABLE = 'macland_push_devices';
@@ -1500,7 +1500,8 @@ final class Macland_Push
         }
         $args['headers'] = (array) ($args['headers'] ?? []);
         $args['headers']['Authorization'] = 'Bearer ' . $token;
-        $args['headers']['Accept'] = strpos((string) $url, '/zipball/') !== false ? 'application/octet-stream' : 'application/vnd.github+json';
+        // Sama Accept fyrir zip-slóðina: GitHub svarar 415 við application/octet-stream á /zipball/.
+        $args['headers']['Accept'] = 'application/vnd.github+json';
         $args['headers']['X-GitHub-Api-Version'] = '2022-11-28';
         $args['headers']['User-Agent'] = 'macland-push-updater';
         return $args;
