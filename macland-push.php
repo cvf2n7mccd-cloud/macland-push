@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Macland – Tilkynningar (app)
  * Description: Macland iPhone-appið: push-tilkynningar og Live Activity (pöntunarstaða) beint í gegnum Apple (APNs), auk gagna fyrir appið sem eru lesin af vefnum sjálfum.
- * Version: 1.5.4
+ * Version: 1.5.5
  * Author: Macland
  * License: GPL-2.0-or-later
  */
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
 
 final class Macland_Push
 {
-    const VERSION = '1.5.4';
+    const VERSION = '1.5.5';
     const OPTION = 'macland_push_settings';
     const LOG_OPTION = 'macland_push_log';
     const TABLE = 'macland_push_devices';
@@ -612,6 +612,20 @@ final class Macland_Push
                 if ($pt !== '' && $pt !== $title && !preg_match('/^(Skoða|Sjá|Kaupa|Lesa)/u', $pt)) {
                     $sub = $pt;
                     break;
+                }
+            }
+            // Forsölulína á spjaldi fylgir vörunni sjálfri (_ml_forsala), ekki föstum texta á forsíðunni:
+            // í forsölu → "Forsala hefst 16. október", annars engin forsölulína. Sama regla og á vörusíðum.
+            $link = $btn->getAttribute('href');
+            if (preg_match('#/vara/([^/?\#]+)/?#u', $link, $mm)) {
+                $post = get_page_by_path(urldecode($mm[1]), OBJECT, 'product');
+                if ($post) {
+                    $fs = self::forsala_text((int) $post->ID);
+                    if ($fs) {
+                        $sub = preg_replace('/\s+kl\.\s.*$/u', '', $fs);
+                    } elseif (preg_match('/^Forsala/u', $sub)) {
+                        $sub = '';
+                    }
                 }
             }
             $cards[] = [
