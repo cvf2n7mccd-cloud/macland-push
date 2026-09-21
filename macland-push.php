@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Macland – Tilkynningar (app)
  * Description: Macland iPhone-appið: push-tilkynningar og Live Activity (pöntunarstaða) beint í gegnum Apple (APNs), auk gagna fyrir appið sem eru lesin af vefnum sjálfum.
- * Version: 1.6.0
+ * Version: 1.6.1
  * Author: Macland
  * License: GPL-2.0-or-later
  */
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
 
 final class Macland_Push
 {
-    const VERSION = '1.6.0';
+    const VERSION = '1.6.1';
     const OPTION = 'macland_push_settings';
     const LOG_OPTION = 'macland_push_log';
     const TABLE = 'macland_push_devices';
@@ -255,10 +255,18 @@ final class Macland_Push
             'data_callback' => function ($product) {
                 $id = $product instanceof WC_Product ? $product->get_id() : (int) $product;
                 $parent = $product instanceof WC_Product && $product->get_parent_id() ? $product->get_parent_id() : $id;
-                return ['forsala' => self::forsala_text($parent) ?: self::forsala_text($id)];
+                $tagline = trim((string) get_post_meta($parent, '_ml_tagline', true));
+                return [
+                    'forsala' => self::forsala_text($parent) ?: self::forsala_text($id),
+                    // Stuttur undirtexti á vöruspjöld (_ml_tagline); appið fellur á fyrstu setningu stuttu lýsingarinnar ef hann vantar.
+                    'tagline' => $tagline !== '' ? $tagline : null,
+                ];
             },
             'schema_callback' => function () {
-                return ['forsala' => ['description' => 'Forsölutexti', 'type' => ['string', 'null'], 'readonly' => true]];
+                return [
+                    'forsala' => ['description' => 'Forsölutexti', 'type' => ['string', 'null'], 'readonly' => true],
+                    'tagline' => ['description' => 'Undirtexti á vöruspjaldi', 'type' => ['string', 'null'], 'readonly' => true],
+                ];
             },
             'schema_type' => ARRAY_A,
         ]);
@@ -341,6 +349,7 @@ final class Macland_Push
         'pearl-white' => '#f4f1ea', 'night-blue' => '#1d2b48', 'olive' => '#7c8a5a', 'crisp-blue' => '#a9cbe8', 'navy-blue' => '#25355b',
         'magenta' => '#b3336f', 'taupe' => '#a3978a', 'mulberry' => '#6e2d4d', 'chambray-blue' => '#8fa5c4', 'sand' => '#d9c8ad',
         'wildflower-blue' => '#a6b9de', 'dark-olive' => '#4a5238', 'navy' => '#1f2f4d', 'light-gray' => '#d4d4d6',
+        'cosmic-orange' => '#f26b2b', 'deep-blue' => '#2a3b5c', 'light-blue' => '#b9d6ec', 'soft-pink' => '#f2c9c9',
     ];
 
     /**
