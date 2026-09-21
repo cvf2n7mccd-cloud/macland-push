@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Macland – Tilkynningar (app)
  * Description: Macland iPhone-appið: push-tilkynningar og Live Activity (pöntunarstaða) beint í gegnum Apple (APNs), auk gagna fyrir appið sem eru lesin af vefnum sjálfum.
- * Version: 1.5.3
+ * Version: 1.5.4
  * Author: Macland
  * License: GPL-2.0-or-later
  */
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
 
 final class Macland_Push
 {
-    const VERSION = '1.5.3';
+    const VERSION = '1.5.4';
     const OPTION = 'macland_push_settings';
     const LOG_OPTION = 'macland_push_log';
     const TABLE = 'macland_push_devices';
@@ -699,6 +699,18 @@ final class Macland_Push
         if (!$order) {
             return;
         }
+        // Ekki tilkynna þegar pöntun er sett í ruslið (WooCommerce keyrir stöðubreytingu í leiðinni)
+        // og aldrei sömu stöðu tvisvar fyrir sömu pöntun.
+        if ((string) $from === (string) $to
+            || doing_action('wp_trash_post') || doing_action('trashed_post') || doing_action('woocommerce_trash_order')
+            || (function_exists('get_post_status') && get_post_status((int) $order_id) === 'trash')) {
+            return;
+        }
+        if ((string) $order->get_meta('_ml_push_status') === (string) $to) {
+            return;
+        }
+        $order->update_meta_data('_ml_push_status', (string) $to);
+        $order->save_meta_data();
         $la_delivered = false;
         if (!empty($settings['auto_la'])) {
             try {
