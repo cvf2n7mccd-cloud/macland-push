@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Macland – Tilkynningar (app)
  * Description: Macland iPhone-appið: push-tilkynningar og Live Activity (pöntunarstaða) beint í gegnum Apple (APNs), auk gagna fyrir appið sem eru lesin af vefnum sjálfum.
- * Version: 1.5.5
+ * Version: 1.6.0
  * Author: Macland
  * License: GPL-2.0-or-later
  */
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
 
 final class Macland_Push
 {
-    const VERSION = '1.5.5';
+    const VERSION = '1.6.0';
     const OPTION = 'macland_push_settings';
     const LOG_OPTION = 'macland_push_log';
     const TABLE = 'macland_push_devices';
@@ -37,6 +37,7 @@ final class Macland_Push
         add_action('plugins_loaded', [__CLASS__, 'maybe_upgrade']);
         add_action('rest_api_init', [__CLASS__, 'register_routes']);
         add_action('woocommerce_init', [__CLASS__, 'register_store_api_data']);
+        add_action('wp_footer', [__CLASS__, 'front_footer'], 50);
         add_action('admin_menu', [__CLASS__, 'admin_menu']);
         add_action('admin_init', [__CLASS__, 'handle_admin_post']);
         add_action('woocommerce_order_status_changed', [__CLASS__, 'on_order_status'], 10, 4);
@@ -205,6 +206,11 @@ final class Macland_Push
             'callback' => [__CLASS__, 'rest_addons'],
             'permission_callback' => '__return_true',
         ]);
+        register_rest_route('macland/v1', '/colors', [
+            'methods' => 'GET',
+            'callback' => [__CLASS__, 'rest_colors'],
+            'permission_callback' => '__return_true',
+        ]);
         // Live Activity (pöntunarstaða)
         register_rest_route('macland/v1', '/liveactivity/pushtostart', [
             'methods' => 'POST',
@@ -259,7 +265,8 @@ final class Macland_Push
     }
 
     /** "Forsala hefst 16. október kl. 12.00" ef _ml_forsala er í framtíðinni, annars null. Sama orðalag og á vefnum. */
-    public static function forsala_text(int $product_id): ?string
+    /** Tímastimpill forsölu (_ml_forsala) eða null ef varan er ekki með forsölu. */
+    public static function forsala_ts(int $product_id): ?int
     {
         $raw = get_post_meta($product_id, '_ml_forsala', true);
         if ($raw === '' || $raw === null) {
@@ -270,6 +277,29 @@ final class Macland_Push
         } catch (Exception $e) {
             return null;
         }
+        return $ts ?: null;
+    }
+
+    /**
+     * Stutta forsölulínan fyrir spjöld og lista: "Forsala hefst 16. október" fram að forsölu,
+     * "Forsala er hafin" fyrstu 30 dagana eftir að hún hefst, annars null. Sama regla á vef og í appi.
+     */
+    public static function forsala_line(int $product_id): ?string
+    {
+        $ts = self::forsala_ts($product_id);
+        if (!$ts) {
+            return null;
+        }
+        if ($ts > time()) {
+            $full = self::forsala_text($product_id);
+            return $full ? preg_replace('/\s+kl\.\s.*$/u', '', $full) : null;
+        }
+        return time() < $ts + 30 * DAY_IN_SECONDS ? 'Forsala er hafin' : null;
+    }
+
+    public static function forsala_text(int $product_id): ?string
+    {
+        $ts = self::forsala_ts($product_id);
         if (!$ts || $ts <= time()) {
             return null;
         }
@@ -297,6 +327,92 @@ final class Macland_Push
         }
         set_transient($key, $text, 10 * MINUTE_IN_SECONDS);
         return $text;
+    }
+
+    /** Litir Apple (enska heitið sem Apple notar) → hex, notað ef YITH-litagildi vantar á lit. */
+    const APPLE_COLORS = [
+        'black' => '#1d1d1f', 'white' => '#f5f5f7', 'silver' => '#e3e4e6', 'starlight' => '#f0e8d8', 'midnight' => '#2e3440',
+        'space-gray' => '#7d7e80', 'space-black' => '#333336', 'sky-blue' => '#c1d8ed', 'blue' => '#8cb2de', 'pink' => '#f0b8c7',
+        'yellow' => '#f7e08c', 'purple' => '#bfb8de', 'green' => '#b7d4b4', 'cloud-white' => '#f2f2f0', 'light-gold' => '#e6d4ad',
+        'natural-titanium' => '#b8b3a9', 'black-titanium' => '#404042', 'gold-titanium' => '#d6bd8f', 'slate-titanium' => '#666b73',
+        'jet-black' => '#141416', 'rose-gold' => '#e6bdb3', 'blush' => '#f2cccc', 'citrus' => '#ede073', 'indigo' => '#666bb3',
+        'orange' => '#f28c4d', 'lavender' => '#d9cfe8', 'sage' => '#b9c7b2', 'mist-blue' => '#bcd0dc', 'burgundy' => '#5c1f2e',
+        'glacier' => '#dbe6ec', 'star-white' => '#f3f1ec', 'night-sky' => '#22263a', 'dark-bronze' => '#5a4a3a', 'radiant-gold' => '#e2c48a',
+        'pearl-white' => '#f4f1ea', 'night-blue' => '#1d2b48', 'olive' => '#7c8a5a', 'crisp-blue' => '#a9cbe8', 'navy-blue' => '#25355b',
+        'magenta' => '#b3336f', 'taupe' => '#a3978a', 'mulberry' => '#6e2d4d', 'chambray-blue' => '#8fa5c4', 'sand' => '#d9c8ad',
+        'wildflower-blue' => '#a6b9de', 'dark-olive' => '#4a5238', 'navy' => '#1f2f4d', 'light-gray' => '#d4d4d6',
+    ];
+
+    /**
+     * Litir (pa_litur) með hex-gildi: YITH-litagildið af vefnum ef það er til, annars fastur Apple-litur.
+     * Appið notar þetta fyrir litadoppurnar. 10 mín skyndiminni.
+     */
+    public static function rest_colors(WP_REST_Request $request)
+    {
+        $cached = get_transient('macland_app_colors');
+        if (is_array($cached) && $request->get_param('fresh') === null) {
+            return $cached;
+        }
+        $out = [];
+        $terms = taxonomy_exists('pa_litur') ? get_terms(['taxonomy' => 'pa_litur', 'hide_empty' => false]) : [];
+        foreach (is_array($terms) ? $terms : [] as $term) {
+            $hex = null;
+            $val = get_term_meta($term->term_id, 'yith_wccl_value', true);
+            if (is_string($val) && preg_match('/#[0-9a-f]{3,8}/i', $val, $m)) {
+                $hex = strtolower($m[0]);
+            }
+            $hex2 = null;
+            if (is_string($val) && preg_match_all('/#[0-9a-f]{3,8}/i', $val, $m) && count($m[0]) > 1) {
+                $hex2 = strtolower($m[0][1]);
+            }
+            if ($hex === null) {
+                $hex = self::APPLE_COLORS[$term->slug] ?? null;
+            }
+            $out[] = ['slug' => $term->slug, 'name' => $term->name, 'hex' => $hex, 'hex2' => $hex2];
+        }
+        $data = ['colors' => $out];
+        set_transient('macland_app_colors', $data, 10 * MINUTE_IN_SECONDS);
+        return $data;
+    }
+
+    /**
+     * Vefurinn: sömu reglur og í appinu.
+     * – Forsíða: "Forsala hefst …" á spjaldi breytist í "Forsala er hafin" kl. 12 daginn sem forsala hefst (án þess að síðan sé uppfærð).
+     * – Vörusíða: "Flokkar:" línan falin og "Innifalið" ekki sýnt við valkosti sem kosta ekkert aukalega.
+     */
+    public static function front_footer(): void
+    {
+        if (is_admin()) {
+            return;
+        }
+        if (function_exists('is_product') && is_product()) {
+            echo '<style id="macland-app-samraemi">.product_meta .posted_in{display:none !important}</style>';
+            echo '<script id="macland-app-samraemi-js">(function(){function f(){document.querySelectorAll(".mlopt-price").forEach(function(e){if(/^\s*innifalið\s*$/i.test(e.textContent)){e.textContent="";e.style.display="none";}});}f();if(window.MutationObserver){new MutationObserver(f).observe(document.body,{childList:true,subtree:true,characterData:true});}})();</script>';
+            return;
+        }
+        if (!is_front_page()) {
+            return;
+        }
+        $map = [];
+        $ids = get_posts(['post_type' => 'product', 'post_status' => 'publish', 'posts_per_page' => 50, 'fields' => 'ids', 'meta_key' => '_ml_forsala', 'meta_compare' => 'EXISTS', 'no_found_rows' => true]);
+        foreach ($ids as $pid) {
+            $ts = self::forsala_ts((int) $pid);
+            if ($ts) {
+                $map[get_post_field('post_name', $pid)] = $ts;
+            }
+        }
+        if (!$map) {
+            return;
+        }
+        echo '<script id="macland-forsala-js">(function(){var M=' . wp_json_encode($map) . ';'
+            . 'function walk(){var now=Date.now()/1000,next=null;'
+            . 'document.querySelectorAll(\'a[href*="/vara/"]\').forEach(function(a){var m=a.getAttribute("href").match(/\/vara\/([^\/?#]+)/);if(!m||!M[m[1]])return;var ts=M[m[1]];'
+            . 'var col=a.closest(".bde-column")||a.parentElement;if(!col)return;'
+            . 'if(now<ts){if(next===null||ts<next)next=ts;return;}'
+            . 'if(now>ts+30*86400)return;'
+            . 'var w=document.createTreeWalker(col,NodeFilter.SHOW_TEXT),n;while((n=w.nextNode())){if(/^\s*Forsala hefst/.test(n.nodeValue)){n.nodeValue="Forsala er hafin";}}});'
+            . 'if(next!==null){setTimeout(walk,Math.min(2147000000,(next-now)*1000+500));}}'
+            . 'walk();})();</script>';
     }
 
     /**
@@ -489,7 +605,14 @@ final class Macland_Push
             return $cached;
         }
         $data = self::parse_home();
-        set_transient('macland_app_home', $data, 10 * MINUTE_IN_SECONDS);
+        // Skyndiminnið rennur út um leið og forsala hefst svo "Forsala er hafin" birtist á réttum tíma.
+        $ttl = 10 * MINUTE_IN_SECONDS;
+        foreach ($data['cards'] as $card) {
+            if (!empty($card['forsala_ts']) && $card['forsala_ts'] > time()) {
+                $ttl = max(30, min($ttl, $card['forsala_ts'] - time()));
+            }
+        }
+        set_transient('macland_app_home', $data, $ttl);
         return $data;
     }
 
@@ -562,9 +685,26 @@ final class Macland_Push
             return $c !== '' && (strpos($c, '#00a9cc') !== false || strpos($c, '#00a6ce') !== false || strpos($c, 'rgb(0,169,204') !== false || strpos($c, 'rgb(0,166,206') !== false);
         };
 
-        // Flísar: fyrsta section með a.m.k. 4 tengla sem innihalda mynd og stutt heiti.
+        // Flísar: flokkaröndin (nav.mlff) eins og vefurinn birtir hana; Þjónusta er með mynd úr CSS-bakgrunni.
         $tiles = [];
-        foreach ($xp->query('//section') as $section) {
+        foreach ($xp->query('//a[contains(concat(" ", normalize-space(@class), " "), " mlff__i ")]') as $a) {
+            $lbl = $xp->query('.//*[contains(@class, "mlff__t")]', $a)->item(0);
+            $t = $lbl ? $text($lbl) : $text($a);
+            $href = (string) $a->getAttribute('href');
+            if ($t === '' || $href === '') {
+                continue;
+            }
+            $image = $img($a);
+            if ($image === null) {
+                $sel = preg_quote('.mlff__i[href*="' . wp_parse_url($href, PHP_URL_PATH) . '"] .mlff__b', '/');
+                if (preg_match('/' . $sel . '\s*\{[^}]*background-image\s*:\s*url\(["\']?([^"\')]+)["\']?\)/i', $html, $mm)) {
+                    $image = html_entity_decode($mm[1]);
+                }
+            }
+            $tiles[] = ['id' => sanitize_title($t), 'title' => $t, 'image' => $image, 'link' => $href];
+        }
+        // Eldri forsíða: fyrsta section með a.m.k. 4 tengla sem innihalda mynd og stutt heiti.
+        foreach ($tiles ? [] : $xp->query('//section') as $section) {
             $found = [];
             $withImage = 0;
             foreach ($xp->query('.//a', $section) as $a) {
@@ -616,13 +756,16 @@ final class Macland_Push
             }
             // Forsölulína á spjaldi fylgir vörunni sjálfri (_ml_forsala), ekki föstum texta á forsíðunni:
             // í forsölu → "Forsala hefst 16. október", annars engin forsölulína. Sama regla og á vörusíðum.
+            // í forsölu → "Forsala hefst 16. október", frá kl. 12 þann dag → "Forsala er hafin" (30 daga), annars engin forsölulína.
             $link = $btn->getAttribute('href');
+            $fts = null;
             if (preg_match('#/vara/([^/?\#]+)/?#u', $link, $mm)) {
                 $post = get_page_by_path(urldecode($mm[1]), OBJECT, 'product');
                 if ($post) {
-                    $fs = self::forsala_text((int) $post->ID);
-                    if ($fs) {
-                        $sub = preg_replace('/\s+kl\.\s.*$/u', '', $fs);
+                    $fts = self::forsala_ts((int) $post->ID);
+                    $fl = self::forsala_line((int) $post->ID);
+                    if ($fl !== null) {
+                        $sub = $fl;
                     } elseif (preg_match('/^Forsala/u', $sub)) {
                         $sub = '';
                     }
@@ -636,6 +779,7 @@ final class Macland_Push
                 'button' => $text($btn),
                 'link' => $btn->getAttribute('href'),
                 'style' => $isCyan($bg($col->getAttribute('class'))) ? 'cyan' : 'grey',
+                'forsala_ts' => $fts,
             ];
         }
 
