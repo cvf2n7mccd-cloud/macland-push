@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Macland – Tilkynningar (app)
  * Description: Macland iPhone-appið: push-tilkynningar og Live Activity (pöntunarstaða) beint í gegnum Apple (APNs), auk gagna fyrir appið sem eru lesin af vefnum sjálfum.
- * Version: 1.6.2
+ * Version: 1.6.3
  * Author: Macland
  * License: GPL-2.0-or-later
  */
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
 
 final class Macland_Push
 {
-    const VERSION = '1.6.2';
+    const VERSION = '1.6.3';
     const OPTION = 'macland_push_settings';
     const LOG_OPTION = 'macland_push_log';
     const TABLE = 'macland_push_devices';
@@ -38,6 +38,11 @@ final class Macland_Push
         add_action('rest_api_init', [__CLASS__, 'register_routes']);
         add_action('woocommerce_init', [__CLASS__, 'register_store_api_data']);
         add_action('wp_footer', [__CLASS__, 'front_footer'], 50);
+        // Lagerstaðan í appinu fylgir vefnum: hreinsa skyndiminnið um leið og lager/vara breytist.
+        foreach (['woocommerce_product_set_stock', 'woocommerce_variation_set_stock', 'woocommerce_product_set_stock_status', 'woocommerce_variation_set_stock_status'] as $hook) {
+            add_action($hook, [__CLASS__, 'flush_lager'], 10, 1);
+        }
+        add_action('save_post_product', [__CLASS__, 'flush_lager'], 10, 1);
         add_action('admin_menu', [__CLASS__, 'admin_menu']);
         add_action('admin_init', [__CLASS__, 'handle_admin_post']);
         add_action('woocommerce_order_status_changed', [__CLASS__, 'on_order_status'], 10, 4);
@@ -217,6 +222,11 @@ final class Macland_Push
             'callback' => [__CLASS__, 'rest_app_spjall_nytt'],
             'permission_callback' => [__CLASS__, 'app_user_permission'],
         ]);
+        register_rest_route('macland/v1', '/lager/(?P<id>\d+)', [
+            'methods' => 'GET',
+            'callback' => [__CLASS__, 'rest_lager'],
+            'permission_callback' => '__return_true',
+        ]);
         register_rest_route('macland/v1', '/colors', [
             'methods' => 'GET',
             'callback' => [__CLASS__, 'rest_colors'],
@@ -394,6 +404,57 @@ final class Macland_Push
     public static function rest_app_spjall_nytt(WP_REST_Request $request)
     {
         return self::forward_spjall($request, '/macland/v1/spjall/nytt');
+    }
+
+    /**
+     * Lagerstaðan (.mllag) eins og vörusíðan á vefnum birtir hana, fyrir vöruna og hvert tilbrigði:
+     * s = a (á lager), f (fá eintök eftir), v (væntanlegt), b (biðpöntun), x (falið); h = fyrirsögn; u = undirtexti.
+     * Lesið af vörusíðunni sjálfri svo appið og vefurinn segi alltaf það sama. 5 mín skyndiminni, hreinsað við lagerbreytingu.
+     */
+    public static function rest_lager(WP_REST_Request $request)
+    {
+        $id = (int) $request['id'];
+        $key = 'macland_app_lager_' . $id;
+        $cached = get_transient($key);
+        if (is_array($cached) && $request->get_param('fresh') === null) {
+            return $cached;
+        }
+        $data = ['product_id' => $id, 'product' => null, 'variations' => new stdClass()];
+        $url = get_permalink($id);
+        $res = $url ? wp_remote_get($url, ['timeout' => 20, 'headers' => ['User-Agent' => 'Macland-App-Lager/1.0']]) : null;
+        if ($res && !is_wp_error($res) && wp_remote_retrieve_response_code($res) === 200) {
+            $html = wp_remote_retrieve_body($res);
+            if (preg_match('/<div class="mllag mllag--([a-z])"(?:\s+data-mllag=\'([^\']*)\')?\s*>\s*<i><\/i>\s*<div>\s*<span class="mllag__h">(.*?)<\/span>\s*<small class="mllag__u">(.*?)<\/small>/su', $html, $m)) {
+                $clean = static fn($t) => trim(html_entity_decode(wp_strip_all_tags($t), ENT_QUOTES, 'UTF-8'));
+                $data['product'] = ['s' => $m[1], 'h' => $clean($m[3]), 'u' => $clean($m[4])];
+                if (!empty($m[2])) {
+                    $vars = json_decode(html_entity_decode($m[2], ENT_QUOTES, 'UTF-8'), true);
+                    if (is_array($vars)) {
+                        $out = [];
+                        foreach ($vars as $vid => $v) {
+                            $out[(string) (int) $vid] = ['s' => (string) ($v['s'] ?? ''), 'h' => (string) ($v['h'] ?? ''), 'u' => (string) ($v['u'] ?? '')];
+                        }
+                        $data['variations'] = (object) $out;
+                    }
+                }
+            }
+        }
+        set_transient($key, $data, 5 * MINUTE_IN_SECONDS);
+        return $data;
+    }
+
+    /** Hreinsar lagerstöðu vörunnar (og foreldris ef tilbrigði) úr skyndiminni appsins. */
+    public static function flush_lager($product): void
+    {
+        $id = $product instanceof WC_Product ? $product->get_id() : (int) $product;
+        if ($id <= 0) {
+            return;
+        }
+        delete_transient('macland_app_lager_' . $id);
+        $parent = wp_get_post_parent_id($id);
+        if ($parent) {
+            delete_transient('macland_app_lager_' . $parent);
+        }
     }
 
     /** Litir Apple (enska heitið sem Apple notar) → hex, notað ef YITH-litagildi vantar á lit. */
