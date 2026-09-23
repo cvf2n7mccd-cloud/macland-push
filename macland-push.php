@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Macland – Tilkynningar (app)
  * Description: Macland iPhone-appið: push-tilkynningar og Live Activity (pöntunarstaða) beint í gegnum Apple (APNs), auk gagna fyrir appið sem eru lesin af vefnum sjálfum.
- * Version: 1.6.1
+ * Version: 1.6.2
  * Author: Macland
  * License: GPL-2.0-or-later
  */
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
 
 final class Macland_Push
 {
-    const VERSION = '1.6.1';
+    const VERSION = '1.6.2';
     const OPTION = 'macland_push_settings';
     const LOG_OPTION = 'macland_push_log';
     const TABLE = 'macland_push_devices';
@@ -206,6 +206,17 @@ final class Macland_Push
             'callback' => [__CLASS__, 'rest_addons'],
             'permission_callback' => '__return_true',
         ]);
+        // Spjall í appinu: sami spjallbotti og á vefnum (/macland/v1/spjall), en aðeins fyrir innskráða notendur appsins.
+        register_rest_route('macland/v1', '/app/spjall', [
+            'methods' => 'POST',
+            'callback' => [__CLASS__, 'rest_app_spjall'],
+            'permission_callback' => [__CLASS__, 'app_user_permission'],
+        ]);
+        register_rest_route('macland/v1', '/app/spjall/nytt', [
+            'methods' => 'POST',
+            'callback' => [__CLASS__, 'rest_app_spjall_nytt'],
+            'permission_callback' => [__CLASS__, 'app_user_permission'],
+        ]);
         register_rest_route('macland/v1', '/colors', [
             'methods' => 'GET',
             'callback' => [__CLASS__, 'rest_colors'],
@@ -335,6 +346,54 @@ final class Macland_Push
         }
         set_transient($key, $text, 10 * MINUTE_IN_SECONDS);
         return $text;
+    }
+
+    /** Innskráður app-notandi (kökur + Store API-nonce í X-Macland-Nonce), annars 401. */
+    public static function app_user_permission(WP_REST_Request $request)
+    {
+        if (self::user_from_cookie($request) > 0) {
+            return true;
+        }
+        return new WP_Error('macland_not_logged_in', 'Skráðu þig inn til að senda okkur skilaboð.', ['status' => 401]);
+    }
+
+    /** Framsendir á spjallbotta vefsins sem innskráði notandinn, merkt sem komið úr appinu. */
+    private static function forward_spjall(WP_REST_Request $request, string $route, array $extra = [])
+    {
+        $user_id = self::user_from_cookie($request);
+        if ($user_id <= 0) {
+            return new WP_Error('macland_not_logged_in', 'Skráðu þig inn til að senda okkur skilaboð.', ['status' => 401]);
+        }
+        wp_set_current_user($user_id);
+        $body = $request->get_json_params();
+        if (!is_array($body)) {
+            $body = [];
+        }
+        $body = array_merge($body, $extra);
+        $inner = new WP_REST_Request('POST', $route);
+        $inner->set_header('Content-Type', 'application/json');
+        $inner->set_body(wp_json_encode($body));
+        $inner->set_body_params($body);
+        foreach (['User-Agent', 'X-Forwarded-For'] as $h) {
+            $v = $request->get_header($h);
+            if ($v) {
+                $inner->set_header($h, $v);
+            }
+        }
+        $res = rest_do_request($inner);
+        $server = rest_get_server();
+        $data = $server->response_to_data($res, false);
+        return new WP_REST_Response($data, $res->get_status());
+    }
+
+    public static function rest_app_spjall(WP_REST_Request $request)
+    {
+        return self::forward_spjall($request, '/macland/v1/spjall', ['sida' => 'app']);
+    }
+
+    public static function rest_app_spjall_nytt(WP_REST_Request $request)
+    {
+        return self::forward_spjall($request, '/macland/v1/spjall/nytt');
     }
 
     /** Litir Apple (enska heitið sem Apple notar) → hex, notað ef YITH-litagildi vantar á lit. */
