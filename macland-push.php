@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Macland – Tilkynningar (app)
  * Description: Macland iPhone-appið: push-tilkynningar og Live Activity (pöntunarstaða) beint í gegnum Apple (APNs), auk gagna fyrir appið sem eru lesin af vefnum sjálfum.
- * Version: 1.7.0
+ * Version: 1.7.1
  * Author: Macland
  * License: GPL-2.0-or-later
  */
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
 
 final class Macland_Push
 {
-    const VERSION = '1.7.0';
+    const VERSION = '1.7.1';
     const OPTION = 'macland_push_settings';
     const LOG_OPTION = 'macland_push_log';
     const TABLE = 'macland_push_devices';
@@ -1145,6 +1145,13 @@ final class Macland_Push
                 $rows[] = ['label' => (string) ($t[0] ?? ''), 'value' => (string) ($t[1] ?? '')];
             }
             $b[] = ['type' => 'specs', 'title' => 'Tæknilýsing', 'rows' => $rows];
+        }
+        if (($g['snid'] ?? '') === 'apple') {
+            // Apple-snið er í TheSans á vefnum; appið notar sama letur þegar style = apple.
+            foreach ($b as &$x) {
+                $x['style'] = $x['style'] ?? 'apple';
+            }
+            unset($x);
         }
         return array_values(array_filter($b, static fn($x) => ($x['type'] !== 'hero') || !empty($x['title'])));
     }
