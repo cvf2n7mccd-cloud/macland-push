@@ -938,7 +938,8 @@ final class Macland_Push
         // Kaflar í sömu röð og á vefnum (1.4+). Eldri útgáfur appsins lesa áfram tiles/cards.
         $order = [];
         if ($tiles) {
-            $order[] = [(int) (strpos($html, 'mlff__i') ?: 0), ['type' => 'tiles', 'title' => 'Verslaðu eftir flokkum', 'items' => $tiles]];
+            // Flokkaröðin birtist efst á vefnum (CSS færir hana upp fyrir spjöldin), svo hún er alltaf fyrst.
+            $order[] = [-1, ['type' => 'tiles', 'title' => 'Verslaðu eftir flokkum', 'items' => $tiles]];
         }
         if ($cards) {
             $order[] = [$cardLine ? min($cardLine) : 1, ['type' => 'cards', 'items' => $cards]];
@@ -1024,6 +1025,7 @@ final class Macland_Push
                         'title' => $one('mlfp-vara__n', $a),
                         'price' => $one('mlfp-vara__v', $a),
                         'badge' => $one('mlfp-vara__s', $a),
+                        'button' => $one('mlfp-vara__h', $a) ?: null,
                         'image' => $img($a),
                         'link' => $a->getAttribute('href'),
                         'product_id' => $pid($a->getAttribute('href')),
