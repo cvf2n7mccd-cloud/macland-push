@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Macland – Tilkynningar (app)
  * Description: Macland iPhone-appið: push-tilkynningar og Live Activity (pöntunarstaða) beint í gegnum Apple (APNs), auk gagna fyrir appið sem eru lesin af vefnum sjálfum.
- * Version: 1.6.3
+ * Version: 1.7.0
  * Author: Macland
  * License: GPL-2.0-or-later
  */
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
 
 final class Macland_Push
 {
-    const VERSION = '1.6.3';
+    const VERSION = '1.7.0';
     const OPTION = 'macland_push_settings';
     const LOG_OPTION = 'macland_push_log';
     const TABLE = 'macland_push_devices';
@@ -221,6 +221,11 @@ final class Macland_Push
             'methods' => 'POST',
             'callback' => [__CLASS__, 'rest_app_spjall_nytt'],
             'permission_callback' => [__CLASS__, 'app_user_permission'],
+        ]);
+        register_rest_route('macland/v1', '/kaflar/(?P<id>\d+)', [
+            'methods' => 'GET',
+            'callback' => [__CLASS__, 'rest_kaflar'],
+            'permission_callback' => '__return_true',
         ]);
         register_rest_route('macland/v1', '/lager/(?P<id>\d+)', [
             'methods' => 'GET',
@@ -856,6 +861,7 @@ final class Macland_Push
 
         // Spjöld: dálkar með fyrirsögn + mynd + hnapp.
         $cards = [];
+        $cardLine = [];
         $seen = [];
         foreach ($xp->query('//*[contains(concat(" ", normalize-space(@class), " "), " bde-column ")]') as $col) {
             $h = $xp->query('.//h1|.//h2|.//h3|.//h4', $col)->item(0);
@@ -900,6 +906,22 @@ final class Macland_Push
                     }
                 }
             }
+            // Niðurtalning (vefurinn setur .mlfp-nt í stað forsölutextans): appið telur sjálft niður að ts.
+            $countdown = null;
+            $nt = $xp->query('.//*[contains(concat(" ", normalize-space(@class), " "), " mlfp-nt ")]', $col)->item(0);
+            if ($nt instanceof DOMElement && (int) $nt->getAttribute('data-ts') > 0) {
+                $lab = $xp->query('.//*[contains(@class,"mlfp-nt__t")]', $nt)->item(0);
+                $aft = $xp->query('.//*[contains(@class,"mlfp-nt__eftir")]', $nt)->item(0);
+                $countdown = [
+                    'ts' => (int) floor((int) $nt->getAttribute('data-ts') / 1000),
+                    'label' => $lab ? $text($lab) : 'Forsala hefst eftir',
+                    'after' => $aft ? $text($aft) : 'Forsala er hafin',
+                ];
+                if (preg_match('/^Forsala hefst eftir/u', $sub)) {
+                    $sub = '';
+                }
+            }
+            $cardLine[] = (int) (strpos($html, $image) ?: PHP_INT_MAX);
             $cards[] = [
                 'id' => sanitize_title($title),
                 'title' => $title,
@@ -909,10 +931,222 @@ final class Macland_Push
                 'link' => $btn->getAttribute('href'),
                 'style' => $isCyan($bg($col->getAttribute('class'))) ? 'cyan' : 'grey',
                 'forsala_ts' => $fts,
+                'countdown' => $countdown,
             ];
         }
 
-        return ['tiles' => $tiles, 'cards' => $cards, 'source' => $url];
+        // Kaflar í sömu röð og á vefnum (1.4+). Eldri útgáfur appsins lesa áfram tiles/cards.
+        $order = [];
+        if ($tiles) {
+            $order[] = [(int) (strpos($html, 'mlff__i') ?: 0), ['type' => 'tiles', 'title' => 'Verslaðu eftir flokkum', 'items' => $tiles]];
+        }
+        if ($cards) {
+            $order[] = [$cardLine ? min($cardLine) : 1, ['type' => 'cards', 'items' => $cards]];
+        }
+        foreach (self::home_extra_sections($xp, $text, $img, $html) as $sec) {
+            $order[] = $sec;
+        }
+        usort($order, static fn($a, $b) => $a[0] <=> $b[0]);
+        $sections = array_values(array_filter(array_map(static fn($x) => $x[1], $order)));
+
+        return ['tiles' => $tiles, 'cards' => $cards, 'sections' => $sections, 'source' => $url];
+    }
+
+
+    /**
+     * Nýju kaflarnir á forsíðu vefsins (section#mlfp úr Macland kerfi): lesnir í þeirri röð sem þeir birtast.
+     * Hver kafli verður almenn gerð sem appið kann að teikna: price_tiles, products, banner.
+     * Óþekktir kaflar eru hunsaðir (birtast þá ekki í appinu fyrr en gerðin er til).
+     *
+     * @return array<int, array{0:int, 1:array}>
+     */
+    private static function home_extra_sections(DOMXPath $xp, callable $text, callable $img, string $html): array
+    {
+        $out = [];
+        $has = static fn(string $c) => 'contains(concat(" ", normalize-space(@class), " "), " ' . $c . ' ")';
+        $one = static function (string $c, DOMNode $ctx) use ($xp, $has, $text) {
+            $n = $xp->query('.//*[' . $has($c) . ']', $ctx)->item(0);
+            return $n ? $text($n) : '';
+        };
+        $imgs = static function (DOMNode $n) use ($xp): array {
+            $r = [];
+            foreach ($xp->query('.//img', $n) as $i) {
+                foreach (['data-src', 'src'] as $a) {
+                    $v = $i->getAttribute($a);
+                    if ($v !== '' && strpos($v, 'data:') !== 0 && substr($v, -4) !== '.svg') {
+                        $r[] = $v;
+                        break;
+                    }
+                }
+            }
+            return $r;
+        };
+        $pid = static function (string $href): ?int {
+            $id = url_to_postid($href);
+            if (!$id && preg_match('#/vara/([^/?\#]+)/?#u', $href, $m)) {
+                $p = get_page_by_path(urldecode($m[1]), OBJECT, 'product');
+                $id = $p ? $p->ID : 0;
+            }
+            return $id && get_post_type($id) === 'product' ? (int) $id : null;
+        };
+        $root = $xp->query('//*[@id="mlfp"]')->item(0);
+        if (!$root) {
+            return $out;
+        }
+        $inner = $xp->query('.//*[' . $has('mlfp__i') . ']', $root)->item(0) ?: $root;
+        foreach ($xp->query('./*', $inner) as $el) {
+            if (!$el instanceof DOMElement) {
+                continue;
+            }
+            $cls = ' ' . $el->getAttribute('class') . ' ';
+            $c1 = preg_split('/\s+/', trim($el->getAttribute('class')))[0] ?? '';
+            $line = (int) (strpos($html, 'class="' . $c1) ?: PHP_INT_MAX);
+            if (strpos($cls, ' mlfp-reitir ') !== false) {
+                $items = [];
+                foreach ($xp->query('./a', $el) as $a) {
+                    $style = preg_match('/mlfp-reitur--([a-z]+)/', $a->getAttribute('class'), $m) ? $m[1] : 'gra';
+                    $items[] = [
+                        'title' => $one('mlfp-reitur__n', $a),
+                        'price' => $one('mlfp-reitur__v', $a),
+                        'image' => $img($a),
+                        'link' => $a->getAttribute('href'),
+                        'product_id' => $pid($a->getAttribute('href')),
+                        'style' => $style === 'sand' ? 'sand' : 'grey',
+                    ];
+                }
+                if ($items) {
+                    $out[] = [$line, ['type' => 'price_tiles', 'items' => $items]];
+                }
+            } elseif (strpos($cls, ' mlfp-vin ') !== false) {
+                $items = [];
+                foreach ($xp->query('.//a[' . $has('mlfp-vara') . ']', $el) as $a) {
+                    $items[] = [
+                        'title' => $one('mlfp-vara__n', $a),
+                        'price' => $one('mlfp-vara__v', $a),
+                        'badge' => $one('mlfp-vara__s', $a),
+                        'image' => $img($a),
+                        'link' => $a->getAttribute('href'),
+                        'product_id' => $pid($a->getAttribute('href')),
+                    ];
+                }
+                $lnk = $xp->query('.//a[' . $has('mlfp-tengill') . ']', $el)->item(0);
+                if ($items) {
+                    $out[] = [$line, ['type' => 'products', 'title' => $one('mlfp-h2', $el), 'items' => $items,
+                        'link_title' => $lnk ? $text($lnk) : null, 'link' => $lnk ? $lnk->getAttribute('href') : null]];
+                }
+            } elseif (strpos($cls, ' mlfp-saga ') !== false || strpos($cls, ' mlfp-fyr ') !== false) {
+                $blue = strpos($cls, ' mlfp-fyr ') !== false;
+                $p = $xp->query('.//p', $el)->item(0);
+                $btn = $xp->query('.//a', $el)->item(0);
+                $out[] = [$line, ['type' => 'banner', 'style' => $blue ? 'blue' : 'sand',
+                    'eyebrow' => $one('mlfp-yfir', $el), 'title' => $one('mlfp-h2', $el), 'text' => $p ? $text($p) : '',
+                    'button' => $btn ? $text($btn) : null, 'link' => $btn ? $btn->getAttribute('href') : null,
+                    'images' => $imgs($el), 'image_style' => $blue ? 'products' : 'photo']];
+            }
+            // mlfp-app (hvatning til að sækja appið) á ekki heima í appinu sjálfu.
+        }
+        return $out;
+    }
+
+    // ---------------------------------------------------------------------
+    // Kaflar á vörusíðu (Flaggskip úr Macland kerfi) sem almennar einingar fyrir appið
+    // ---------------------------------------------------------------------
+
+    public static function rest_kaflar(WP_REST_Request $request)
+    {
+        $id = (int) $request['id'];
+        $key = 'macland_app_kaflar_' . $id;
+        $cached = get_transient($key);
+        if (is_array($cached) && $request->get_param('fresh') === null) {
+            return $cached;
+        }
+        $data = ['blocks' => self::kaflar_blocks($id)];
+        set_transient($key, $data, 10 * MINUTE_IN_SECONDS);
+        return $data;
+    }
+
+    private static function kaflar_mynd($vara, $l): ?string
+    {
+        if (!is_string($l) || $l === '') {
+            return null;
+        }
+        if (strpos($l, 'eign:') === 0) {
+            return function_exists('macland_ap_slod') ? macland_ap_slod(basename(substr($l, 5))) : null;
+        }
+        $aid = 0;
+        if ($l === 'adal') {
+            $aid = (int) $vara->get_image_id();
+        } elseif (strpos($l, 'gal:') === 0) {
+            $gal = $vara->get_gallery_image_ids();
+            $n = (int) substr($l, 4);
+            $aid = isset($gal[$n]) ? (int) $gal[$n] : (int) $vara->get_image_id();
+        }
+        if ($aid) {
+            $u = wp_get_attachment_image_url($aid, 'large');
+            return $u ?: null;
+        }
+        return preg_match('#^https?://#', $l) ? $l : null;
+    }
+
+    /** Texti: *orð* = áhersla (appið litar), annars hreinn texti. */
+    private static function kaflar_blocks(int $id): array
+    {
+        if (!function_exists('macland_fs_gogn') || !function_exists('wc_get_product')) {
+            return [];
+        }
+        $vara = wc_get_product($id);
+        $g = $vara ? macland_fs_gogn($vara) : null;
+        if (!$vara || !is_array($g)) {
+            return [];
+        }
+        $m = static fn($l) => self::kaflar_mynd($vara, $l);
+        $b = [];
+        if (($g['snid'] ?? '') === 'apple') {
+            $b[] = ['type' => 'hero', 'eyebrow' => $g['hetja_yfir'] ?? null, 'title' => $g['hetja_titill'] ?? $vara->get_name(),
+                'text' => $g['hetja_undir'] ?? null, 'image' => $m($g['hetja_mynd'] ?? ''), 'background' => $g['hetja_bakgrunnur'] ?? null];
+            if (!empty($g['atridi'])) {
+                $items = [];
+                foreach ($g['atridi'] as $a) {
+                    $items[] = ['image' => $m($a['mynd'] ?? ''), 'text' => $a['texti'] ?? '', 'dark' => !empty($a['dokkt']),
+                        'fit' => ($a['passa'] ?? '') === 'contain' ? 'contain' : 'cover', 'background' => $a['bak'] ?? null];
+                }
+                $b[] = ['type' => 'carousel', 'title' => $g['atridi_fyrirsogn'] ?? 'Helstu atriðin.', 'items' => $items];
+            }
+            foreach ((array) ($g['kaflar'] ?? []) as $k) {
+                $cols = [];
+                foreach ((array) ($k['dalkar'] ?? []) as $d) {
+                    $cols[] = ['title' => $d[0] ?? '', 'text' => $d[1] ?? ''];
+                }
+                $b[] = ['type' => 'feature', 'eyebrow' => $k['yfir'] ?? null, 'title' => $k['fyrirsogn'] ?? '', 'text' => $k['texti'] ?? null,
+                    'image' => $m($k['mynd'] ?? ''), 'dark' => !empty($k['dokkt']), 'columns' => $cols];
+            }
+        } else {
+            $b[] = ['type' => 'hero', 'eyebrow' => $g['yfir'] ?? null, 'title' => $g['fyrirsogn'] ?? $vara->get_name(),
+                'text' => $g['texti'] ?? null, 'image' => $m($g['mynd'] ?? ''), 'background' => null];
+            if (!empty($g['tolur'])) {
+                $items = [];
+                foreach ($g['tolur'] as $t) {
+                    $items[] = ['value' => (string) ($t[0] ?? ''), 'unit' => (string) ($t[1] ?? ''), 'text' => (string) ($t[2] ?? '')];
+                }
+                $b[] = ['type' => 'stats', 'items' => $items];
+            }
+            if (!empty($g['kostir'])) {
+                $items = [];
+                foreach ($g['kostir'] as $k) {
+                    $items[] = ['eyebrow' => $k['merki'] ?? null, 'title' => $k['fyrirsogn'] ?? '', 'text' => $k['texti'] ?? null,
+                        'badge' => $k['tala'] ?? null, 'image' => $m($k['mynd'] ?? ''), 'dark' => !empty($k['dokkt']), 'wide' => !empty($k['breitt'])];
+                }
+                $b[] = ['type' => 'features', 'title' => $g['kostir_fyrirsogn'] ?? null, 'items' => $items];
+            }
+        }
+        if (!empty($g['taekni'])) {
+            $rows = [];
+            foreach ($g['taekni'] as $t) {
+                $rows[] = ['label' => (string) ($t[0] ?? ''), 'value' => (string) ($t[1] ?? '')];
+            }
+            $b[] = ['type' => 'specs', 'title' => 'Tæknilýsing', 'rows' => $rows];
+        }
+        return array_values(array_filter($b, static fn($x) => ($x['type'] !== 'hero') || !empty($x['title'])));
     }
 
     /**
