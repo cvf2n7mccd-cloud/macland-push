@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Macland – Tilkynningar (app)
  * Description: Macland iPhone-appið: push-tilkynningar og Live Activity (pöntunarstaða) beint í gegnum Apple (APNs), auk gagna fyrir appið sem eru lesin af vefnum sjálfum.
- * Version: 1.7.1
+ * Version: 1.7.2
  * Author: Macland
  * License: GPL-2.0-or-later
  */
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
 
 final class Macland_Push
 {
-    const VERSION = '1.7.1';
+    const VERSION = '1.7.2';
     const OPTION = 'macland_push_settings';
     const LOG_OPTION = 'macland_push_log';
     const TABLE = 'macland_push_devices';
@@ -863,7 +863,9 @@ final class Macland_Push
         $cards = [];
         $cardLine = [];
         $seen = [];
-        foreach ($xp->query('//*[contains(concat(" ", normalize-space(@class), " "), " bde-column ")]') as $col) {
+        // Breakdance-dálkar (eldri forsíða) og stóru vörureitirnir í Apple-útliti (article.mlfpa-k, Macland kerfi 0.9.31+).
+        foreach ($xp->query('//*[contains(concat(" ", normalize-space(@class), " "), " bde-column ") or contains(concat(" ", normalize-space(@class), " "), " mlfpa-k ")]') as $col) {
+            $apple = strpos(' ' . $col->getAttribute('class') . ' ', ' mlfpa-k ') !== false;
             $h = $xp->query('.//h1|.//h2|.//h3|.//h4', $col)->item(0);
             $btn = null;
             foreach ($xp->query('.//a', $col) as $a) {
@@ -882,7 +884,11 @@ final class Macland_Push
             }
             $seen[$title] = true;
             $sub = '';
-            foreach ($xp->query('.//p|.//*[contains(@class,"bde-text")]', $col) as $p) {
+            $undir = $apple ? $xp->query('.//*[contains(concat(" ", normalize-space(@class), " "), " mlfpa-undir ")]', $col)->item(0) : null;
+            if ($undir) {
+                $sub = $text($undir);
+            }
+            foreach ($undir ? [] : $xp->query('.//p|.//*[contains(@class,"bde-text")]', $col) as $p) {
                 $pt = $text($p);
                 if ($pt !== '' && $pt !== $title && !preg_match('/^(Skoða|Sjá|Kaupa|Lesa)/u', $pt)) {
                     $sub = $pt;
@@ -929,7 +935,7 @@ final class Macland_Push
                 'image' => $image,
                 'button' => $text($btn),
                 'link' => $btn->getAttribute('href'),
-                'style' => $isCyan($bg($col->getAttribute('class'))) ? 'cyan' : 'grey',
+                'style' => $apple ? 'grey' : ($isCyan($bg($col->getAttribute('class'))) ? 'cyan' : 'grey'),
                 'forsala_ts' => $fts,
                 'countdown' => $countdown,
             ];
