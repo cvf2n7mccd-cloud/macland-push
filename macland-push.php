@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Macland – Tilkynningar (app)
  * Description: Macland iPhone-appið: push-tilkynningar og Live Activity (pöntunarstaða) beint í gegnum Apple (APNs), auk gagna fyrir appið sem eru lesin af vefnum sjálfum.
- * Version: 1.7.1
+ * Version: 1.7.2
  * Author: Macland
  * License: GPL-2.0-or-later
  */
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
 
 final class Macland_Push
 {
-    const VERSION = '1.7.1';
+    const VERSION = '1.7.2';
     const OPTION = 'macland_push_settings';
     const LOG_OPTION = 'macland_push_log';
     const TABLE = 'macland_push_devices';
@@ -859,11 +859,75 @@ final class Macland_Push
             }
         }
 
-        // Spjöld: dálkar með fyrirsögn + mynd + hnapp.
+        // Spjöld: nýja forsíðan (Macland kerfi 0.9.50+, article.mlfpa-k í röð stillingasíðunnar „Forsíða“).
         $cards = [];
         $cardLine = [];
         $seen = [];
-        foreach ($xp->query('//*[contains(concat(" ", normalize-space(@class), " "), " bde-column ")]') as $col) {
+        $has = static fn(string $c) => 'contains(concat(" ", normalize-space(@class), " "), " ' . $c . ' ")';
+        foreach ($xp->query('//article[' . $has('mlfpa-k') . ']') as $art) {
+            $h = $xp->query('.//*[' . $has('mlfpa-h') . ']', $art)->item(0);
+            $title = $h ? $text($h) : '';
+            if ($title === '' || isset($seen[$title])) {
+                continue;
+            }
+            $seen[$title] = true;
+            $mynd = $xp->query('.//*[' . $has('mlfpa-k__m') . ']', $art)->item(0);
+            $image = $mynd ? $img($mynd) : $img($art);
+            $one = static function (string $c) use ($xp, $art, $has, $text) {
+                $n = $xp->query('.//*[' . $has($c) . ']', $art)->item(0);
+                return $n ? $text($n) : '';
+            };
+            $btns = [];
+            foreach ($xp->query('.//a[' . $has('mlfpa-hnappur') . ']', $art) as $a) {
+                $btns[] = ['title' => $text($a), 'link' => (string) $a->getAttribute('href')];
+            }
+            $link = $btns ? $btns[0]['link'] : ($mynd instanceof DOMElement ? (string) $mynd->getAttribute('href') : '');
+            $cls = ' ' . $art->getAttribute('class') . ' ';
+            $theme = strpos($cls, ' mlfpa-k--dokkt ') !== false ? 'dark' : (strpos($cls, ' mlfpa-k--hvitt ') !== false ? 'white' : 'light');
+            $sub = $one('mlfpa-undir');
+            $price = $one('mlfpa-verd');
+            $fts = null;
+            if (preg_match('#/vara/([^/?\#]+)/?#u', $link, $mm)) {
+                $post = get_page_by_path(urldecode($mm[1]), OBJECT, 'product');
+                if ($post) {
+                    $fts = self::forsala_ts((int) $post->ID);
+                }
+            }
+            $countdown = null;
+            $nt = $xp->query('.//*[' . $has('mlfp-nt') . ']', $art)->item(0);
+            if ($nt instanceof DOMElement && (int) $nt->getAttribute('data-ts') > 0) {
+                $lab = $xp->query('.//*[contains(@class,"mlfp-nt__t")]', $nt)->item(0);
+                $aft = $xp->query('.//*[contains(@class,"mlfp-nt__eftir")]', $nt)->item(0);
+                $countdown = [
+                    'ts' => (int) floor((int) $nt->getAttribute('data-ts') / 1000),
+                    'label' => $lab ? $text($lab) : 'Forsala hefst eftir',
+                    'after' => $aft ? $text($aft) : 'Forsala er hafin',
+                ];
+            }
+            $cardLine[] = (int) ($image !== null ? (strpos($html, $image) ?: PHP_INT_MAX) : PHP_INT_MAX);
+            $cards[] = [
+                'id' => sanitize_title($title),
+                'title' => $title,
+                // Eldri öpp sýna aðeins subtitle: verðið fylgir því með.
+                'subtitle' => trim($sub . ($price !== '' ? ($sub !== '' ? ' · ' : '') . $price : '')),
+                'image' => $image,
+                'button' => $btns ? $btns[0]['title'] : 'Skoða',
+                'link' => $link,
+                // Eldri öpp þekkja cyan/grey: dökka spjaldið (Duo) fær bláa litinn svo það skeri sig úr eins og á vefnum.
+                'style' => $theme === 'dark' ? 'cyan' : 'grey',
+                'theme' => $theme,
+                'eyebrow' => $one('mlfpa-yfir'),
+                'text' => $sub,
+                'price' => $price,
+                'buttons' => $btns,
+                'size' => strpos($cls, ' mlfpa-k--reitur ') !== false ? 'half' : 'full',
+                'forsala_ts' => $fts,
+                'countdown' => $countdown,
+            ];
+        }
+
+        // Eldri forsíða (Breakdance): dálkar með fyrirsögn + mynd + hnapp.
+        foreach ($cards ? [] : $xp->query('//*[contains(concat(" ", normalize-space(@class), " "), " bde-column ")]') as $col) {
             $h = $xp->query('.//h1|.//h2|.//h3|.//h4', $col)->item(0);
             $btn = null;
             foreach ($xp->query('.//a', $col) as $a) {
