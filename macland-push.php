@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Macland – Tilkynningar (app)
  * Description: Macland iPhone-appið: push-tilkynningar og Live Activity (pöntunarstaða) beint í gegnum Apple (APNs), auk gagna fyrir appið sem eru lesin af vefnum sjálfum.
- * Version: 1.7.3
+ * Version: 1.7.4
  * Author: Macland
  * License: GPL-2.0-or-later
  */
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
 
 final class Macland_Push
 {
-    const VERSION = '1.7.3';
+    const VERSION = '1.7.4';
     const OPTION = 'macland_push_settings';
     const LOG_OPTION = 'macland_push_log';
     const TABLE = 'macland_push_devices';
@@ -336,6 +336,11 @@ final class Macland_Push
         $ts = self::forsala_ts($product_id);
         if (!$ts || $ts <= time()) {
             return null;
+        }
+        // Eigin texti (_ml_forsala_texti, Macland kerfi 0.9.84), t.d. „Verð kynnt fljótlega“ þegar forsöludagur er óákveðinn.
+        $own = trim(wp_strip_all_tags((string) get_post_meta($product_id, '_ml_forsala_texti', true)));
+        if ($own !== '') {
+            return $own;
         }
         // Orðalagið sjálft er tekið af vörusíðunni svo það sé nákvæmlega eins og á vefnum (10 mín skyndiminni).
         $key = 'macland_forsala_txt_' . $product_id;
