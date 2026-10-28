@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Macland – Tilkynningar (app)
  * Description: Macland iPhone-appið: push-tilkynningar og Live Activity (pöntunarstaða) beint í gegnum Apple (APNs), auk gagna fyrir appið sem eru lesin af vefnum sjálfum.
- * Version: 1.7.4
+ * Version: 1.7.5
  * Author: Macland
  * License: GPL-2.0-or-later
  */
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
 
 final class Macland_Push
 {
-    const VERSION = '1.7.4';
+    const VERSION = '1.7.5';
     const OPTION = 'macland_push_settings';
     const LOG_OPTION = 'macland_push_log';
     const TABLE = 'macland_push_devices';
@@ -48,6 +48,7 @@ final class Macland_Push
         add_action('woocommerce_order_status_changed', [__CLASS__, 'on_order_status'], 10, 4);
         add_action('transition_post_status', [__CLASS__, 'on_post_publish'], 10, 3);
         add_action(self::CRON_HOOK, [__CLASS__, 'send_batch'], 10, 1);
+        add_action('macland_push_endurnyja', [__CLASS__, 'swr_refresh'], 10, 2);
         add_action(self::LA_POLL_HOOK, [__CLASS__, 'la_poll']);
         add_filter('cron_schedules', [__CLASS__, 'cron_schedules']);
         // Sjálfvirkar uppfærslur úr private GitHub-geymslu
@@ -342,12 +343,20 @@ final class Macland_Push
         if ($own !== '') {
             return $own;
         }
-        // Orðalagið sjálft er tekið af vörusíðunni svo það sé nákvæmlega eins og á vefnum (10 mín skyndiminni).
-        $key = 'macland_forsala_txt_' . $product_id;
-        $cached = get_transient($key);
-        if (is_string($cached) && $cached !== '') {
-            return $cached;
-        }
+        $d = self::swr('forsala', (string) $product_id, 10 * MINUTE_IN_SECONDS, static fn() => self::build_forsala_text($product_id));
+        return is_string($d) && $d !== '' ? $d : self::forsala_default_text($ts);
+    }
+
+    private static function forsala_default_text(int $ts): string
+    {
+        $months = ['', 'janúar', 'febrúar', 'mars', 'apríl', 'maí', 'júní', 'júlí', 'ágúst', 'september', 'október', 'nóvember', 'desember'];
+        return sprintf('Forsala hefst %d. %s kl. %s', (int) wp_date('j', $ts), $months[(int) wp_date('n', $ts)], wp_date('H.i', $ts));
+    }
+
+    /** Orðalagið sjálft er tekið af vörusíðunni svo það sé nákvæmlega eins og á vefnum. Aðeins í bakgrunni (swr). */
+    private static function build_forsala_text(int $product_id): string
+    {
+        $ts = (int) self::forsala_ts($product_id);
         $text = '';
         $url = get_permalink($product_id);
         if ($url) {
@@ -361,10 +370,8 @@ final class Macland_Push
             }
         }
         if ($text === '') {
-            $months = ['', 'janúar', 'febrúar', 'mars', 'apríl', 'maí', 'júní', 'júlí', 'ágúst', 'september', 'október', 'nóvember', 'desember'];
-            $text = sprintf('Forsala hefst %d. %s kl. %s', (int) wp_date('j', $ts), $months[(int) wp_date('n', $ts)], wp_date('H.i', $ts));
+            $text = $ts ? self::forsala_default_text($ts) : '';
         }
-        set_transient($key, $text, 10 * MINUTE_IN_SECONDS);
         return $text;
     }
 
@@ -421,14 +428,109 @@ final class Macland_Push
      * s = a (á lager), f (fá eintök eftir), v (væntanlegt), b (biðpöntun), x (falið); h = fyrirsögn; u = undirtexti.
      * Lesið af vörusíðunni sjálfri svo appið og vefurinn segi alltaf það sama. 5 mín skyndiminni, hreinsað við lagerbreytingu.
      */
+
+    // ---------------------------------------------------------------------
+    // Skyndiminni sem bíður aldrei eftir eigin vef (1.7.4, eftir að vefurinn fraus 16.10.2026 kl. 12:00)
+    // Endapunktar appsins sem lesa síður af macland.is (forsíða, lager, flakkrönd, valkostir, forsölutexti)
+    // sækja þær ALDREI meðan notandi bíður: síðasta svar er sent strax og nýtt sótt í bakgrunni (WP-Cron),
+    // eitt í einu fyrir hvern lykil. Aðeins ef ekkert svar er til er sótt strax, og þá af einni beiðni í einu.
+    // ---------------------------------------------------------------------
+
+    /** @return mixed|null */
+    private static function swr(string $type, string $arg, int $ttl, callable $build)
+    {
+        $key = 'mlp_swr_' . md5($type . '|' . $arg);
+        $box = get_option($key);
+        if (is_array($box) && array_key_exists('d', $box)) {
+            $age = time() - (int) ($box['t'] ?? 0);
+            if ($age >= (int) ($box['ttl'] ?? $ttl) && add_option($key . '_las', time(), '', false)) {
+                if (!wp_next_scheduled('macland_push_endurnyja', [$type, $arg])) {
+                    wp_schedule_single_event(time(), 'macland_push_endurnyja', [$type, $arg]);
+                }
+            } elseif ((int) get_option($key . '_las') && (int) get_option($key . '_las') < time() - 120) {
+                delete_option($key . '_las'); // gamall lás eftir bakgrunnsverk sem dó
+            }
+            return $box['d'];
+        }
+        // Ekkert svar til enn. Allt nema forsíðan er sótt í bakgrunni og autt svar sent á meðan
+        // (appið notar þá lagerstöðu WooCommerce). Forsíðan er sótt strax, en af einni beiðni í einu.
+        if ($type !== 'home') {
+            if (add_option($key . '_las', time(), '', false) && !wp_next_scheduled('macland_push_endurnyja', [$type, $arg])) {
+                wp_schedule_single_event(time(), 'macland_push_endurnyja', [$type, $arg]);
+            } elseif ((int) get_option($key . '_las') < time() - 120) {
+                delete_option($key . '_las');
+            }
+            return null;
+        }
+        $gamalt = get_transient('macland_app_home'); // svar frá eldri útgáfu: nota það og endurnýja í bakgrunni
+        if (is_array($gamalt)) {
+            update_option($key, ['t' => 0, 'ttl' => $ttl, 'd' => $gamalt], false);
+            return self::swr($type, $arg, $ttl, $build);
+        }
+        if (!add_option($key . '_las', time(), '', false)) {
+            if ((int) get_option($key . '_las') < time() - 120) {
+                delete_option($key . '_las');
+            }
+            return null;
+        }
+        $d = $build();
+        self::swr_save($key, $d, $ttl);
+        return $d;
+    }
+
+    private static function swr_save(string $key, $d, int $ttl): void
+    {
+        update_option($key, ['t' => time(), 'ttl' => $ttl, 'd' => $d], false);
+        delete_option($key . '_las');
+    }
+
+    /** Bakgrunnsverk (WP-Cron): sækir eitt svar upp á nýtt. */
+    public static function swr_refresh($type, $arg): void
+    {
+        $type = (string) $type; $arg = (string) $arg;
+        $key = 'mlp_swr_' . md5($type . '|' . $arg);
+        switch ($type) {
+            case 'home':
+                $d = self::parse_home();
+                self::swr_save($key, $d, self::home_ttl($d));
+                break;
+            case 'lager':
+                self::swr_save($key, self::build_lager((int) $arg), 5 * MINUTE_IN_SECONDS);
+                break;
+            case 'nav':
+                self::swr_save($key, ['path' => $arg, 'tiles' => self::parse_nav(home_url($arg))], 10 * MINUTE_IN_SECONDS);
+                break;
+            case 'addons':
+                self::swr_save($key, ['product_id' => (int) $arg, 'addons' => self::parse_addons((int) $arg)], 10 * MINUTE_IN_SECONDS);
+                break;
+            case 'forsala':
+                self::swr_save($key, self::build_forsala_text((int) $arg), 10 * MINUTE_IN_SECONDS);
+                break;
+            default:
+                delete_option($key . '_las');
+        }
+    }
+
+    /** Merkir svar úrelt (sent áfram þar til nýtt er komið) í stað þess að eyða því. */
+    private static function swr_urelt(string $type, string $arg): void
+    {
+        $key = 'mlp_swr_' . md5($type . '|' . $arg);
+        $box = get_option($key);
+        if (is_array($box)) {
+            $box['t'] = 0;
+            update_option($key, $box, false);
+        }
+    }
+
     public static function rest_lager(WP_REST_Request $request)
     {
         $id = (int) $request['id'];
-        $key = 'macland_app_lager_' . $id;
-        $cached = get_transient($key);
-        if (is_array($cached) && $request->get_param('fresh') === null) {
-            return $cached;
-        }
+        $d = self::swr('lager', (string) $id, 5 * MINUTE_IN_SECONDS, static fn() => self::build_lager($id));
+        return is_array($d) ? $d : ['product_id' => $id, 'product' => null, 'variations' => new stdClass()];
+    }
+
+    private static function build_lager(int $id): array
+    {
         $data = ['product_id' => $id, 'product' => null, 'variations' => new stdClass()];
         $url = get_permalink($id);
         $res = $url ? wp_remote_get($url, ['timeout' => 20, 'headers' => ['User-Agent' => 'Macland-App-Lager/1.0']]) : null;
@@ -449,7 +551,6 @@ final class Macland_Push
                 }
             }
         }
-        set_transient($key, $data, 5 * MINUTE_IN_SECONDS);
         return $data;
     }
 
@@ -460,10 +561,10 @@ final class Macland_Push
         if ($id <= 0) {
             return;
         }
-        delete_transient('macland_app_lager_' . $id);
+        self::swr_urelt('lager', (string) $id);
         $parent = wp_get_post_parent_id($id);
         if ($parent) {
-            delete_transient('macland_app_lager_' . $parent);
+            self::swr_urelt('lager', (string) $parent);
         }
     }
 
@@ -561,14 +662,8 @@ final class Macland_Push
     public static function rest_addons(WP_REST_Request $request)
     {
         $id = (int) $request['id'];
-        $key = 'macland_app_addons_' . $id;
-        $cached = get_transient($key);
-        if (is_array($cached) && $request->get_param('fresh') === null) {
-            return $cached;
-        }
-        $data = ['product_id' => $id, 'addons' => self::parse_addons($id)];
-        set_transient($key, $data, 10 * MINUTE_IN_SECONDS);
-        return $data;
+        $d = self::swr('addons', (string) $id, 10 * MINUTE_IN_SECONDS, static fn() => ['product_id' => $id, 'addons' => self::parse_addons($id)]);
+        return is_array($d) ? $d : ['product_id' => $id, 'addons' => []];
     }
 
 
@@ -580,14 +675,8 @@ final class Macland_Push
     {
         $path = '/' . ltrim((string) $request->get_param('path'), '/');
         $path = preg_replace('#[^A-Za-z0-9\-_/%.]#', '', $path);
-        $key = 'macland_app_nav_' . md5($path);
-        $cached = get_transient($key);
-        if (is_array($cached) && $request->get_param('fresh') === null) {
-            return $cached;
-        }
-        $data = ['path' => $path, 'tiles' => self::parse_nav(home_url($path))];
-        set_transient($key, $data, 10 * MINUTE_IN_SECONDS);
-        return $data;
+        $d = self::swr('nav', $path, 10 * MINUTE_IN_SECONDS, static fn() => ['path' => $path, 'tiles' => self::parse_nav(home_url($path))]);
+        return is_array($d) ? $d : ['path' => $path, 'tiles' => []];
     }
 
     private static function parse_nav(string $url): array
@@ -739,20 +828,22 @@ final class Macland_Push
 
     public static function rest_home(WP_REST_Request $request)
     {
-        $cached = get_transient('macland_app_home');
-        if (is_array($cached) && $request->get_param('fresh') === null) {
-            return $cached;
-        }
-        $data = self::parse_home();
-        // Skyndiminnið rennur út um leið og forsala hefst svo "Forsala er hafin" birtist á réttum tíma.
+        $d = self::swr('home', '', 10 * MINUTE_IN_SECONDS, static function () {
+            return self::parse_home();
+        });
+        return is_array($d) ? $d : ['tiles' => [], 'cards' => [], 'sections' => [], 'source' => home_url('/')];
+    }
+
+    /** Skyndiminnið endurnýjast um leið og forsala hefst (appið telur sjálft niður, svo 2 mín duga). */
+    private static function home_ttl(array $data): int
+    {
         $ttl = 10 * MINUTE_IN_SECONDS;
-        foreach ($data['cards'] as $card) {
+        foreach (($data['cards'] ?? []) as $card) {
             if (!empty($card['forsala_ts']) && $card['forsala_ts'] > time()) {
-                $ttl = max(30, min($ttl, $card['forsala_ts'] - time()));
+                $ttl = max(2 * MINUTE_IN_SECONDS, min($ttl, $card['forsala_ts'] - time()));
             }
         }
-        set_transient('macland_app_home', $data, $ttl);
-        return $data;
+        return $ttl;
     }
 
     /**
