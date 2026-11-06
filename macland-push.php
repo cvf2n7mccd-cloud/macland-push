@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Macland – Tilkynningar (app)
  * Description: Macland iPhone-appið: push-tilkynningar og Live Activity (pöntunarstaða) beint í gegnum Apple (APNs), auk gagna fyrir appið sem eru lesin af vefnum sjálfum.
- * Version: 1.7.5
+ * Version: 1.7.6
  * Author: Macland
  * License: GPL-2.0-or-later
  */
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
 
 final class Macland_Push
 {
-    const VERSION = '1.7.5';
+    const VERSION = '1.7.6';
     const OPTION = 'macland_push_settings';
     const LOG_OPTION = 'macland_push_log';
     const TABLE = 'macland_push_devices';
@@ -532,6 +532,38 @@ final class Macland_Push
     private static function build_lager(int $id): array
     {
         $data = ['product_id' => $id, 'product' => null, 'variations' => new stdClass()];
+        // 1.7.6: reikna beint með sömu föllum og vörusíðan (Macland kerfi) í stað þess að sækja síðuna (skyndiminni gat verið úrelt)
+        if (function_exists('macland_lag_stada') && function_exists('wc_get_product')) {
+            $p = wc_get_product($id);
+            if ($p) {
+                $fix = static function ($st, $sku) {
+                    if (function_exists('macland_lag2_stada')) {
+                        $st = macland_lag2_stada($st, (string) $sku);
+                    }
+                    return is_array($st) ? ['s' => (string) ($st['s'] ?? ''), 'h' => (string) ($st['h'] ?? ''), 'u' => (string) ($st['u'] ?? '')] : null;
+                };
+                $out = [];
+                if ($p->is_type('variable')) {
+                    foreach ($p->get_children() as $vid) {
+                        $v = wc_get_product($vid);
+                        if (!$v || 'publish' !== get_post_status($vid)) {
+                            continue;
+                        }
+                        $st = $fix(macland_lag_stada($v), $v->get_sku());
+                        if ($st) {
+                            $out[(string) (int) $vid] = $st;
+                            if (null === $data['product']) {
+                                $data['product'] = $st;
+                            }
+                        }
+                    }
+                    $data['variations'] = (object) $out;
+                } else {
+                    $data['product'] = $fix(macland_lag_stada($p), $p->get_sku());
+                }
+                return $data;
+            }
+        }
         $url = get_permalink($id);
         $res = $url ? wp_remote_get($url, ['timeout' => 20, 'headers' => ['User-Agent' => 'Macland-App-Lager/1.0']]) : null;
         if ($res && !is_wp_error($res) && wp_remote_retrieve_response_code($res) === 200) {
